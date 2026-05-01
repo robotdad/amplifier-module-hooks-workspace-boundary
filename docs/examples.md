@@ -358,6 +358,8 @@ With `resolve_symlinks: false`, the path stays as `~/Work/my-project/data/users.
 | Reads outside workspace | Agent reads ~/.aws, ~/.ssh, other projects | Denied unless on read allowlist |
 | Git in wrong directory | Commits land in stale checkout | `cd` to wrong dir denied |
 | Variable indirection in bash | Agent uses `$()` to escape boundary | Warning (or deny in strict mode) |
+| URLs in bash commands | `curl http://host/path` blocked as filesystem path | URL stripped before path check — not blocked |
+| Container exec paths | `docker exec c -- cat /app/cfg` blocked as host path | Paths after `--` stripped — not blocked |
 | Multi-agent path propagation | Bad path reinforced through chain | Chain breaks at first agent |
 | Writes to global config | Agent modifies ~/.config, /etc | Denied unless on write allowlist |
 | `..` traversal | Path escapes to parent directories | Collapsed by normalization, denied |

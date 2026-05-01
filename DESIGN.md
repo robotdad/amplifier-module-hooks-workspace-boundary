@@ -176,11 +176,18 @@ This is the hard part. The hook can reject `bash` calls before execution but can
 
 ### Required behavior for bash interception
 
-1. Extract absolute path tokens via regex (`/[^\s;|&]*`).
-2. Resolve and check each candidate against boundary.
-3. `deny` if any candidate is out of bounds.
-4. Emit `user_message` warning when the command contains patterns that defeat static analysis: `$(...)`, backticks, `${...}`, `eval`, `source`, `exec`, or assignments to path variables.
-5. By default, do **not** deny ambiguous commands (would block too many legitimate cases). A `bash_strict_mode: true` config option escalates this to `deny`.
+1. **Pre-filter: strip non-filesystem tokens** before path extraction.
+   - **URLs** — replace `scheme://...` tokens with whitespace so URL path components (e.g. `/admin/pages` in `http://host/admin/pages`) are not extracted.
+   - **Container exec** — when a container runtime `exec` command is detected (`docker`, `podman`, `incus`, `kubectl`, `nerdctl`, `lxc`, `amplifier-digital-twin`), strip everything after the `--` separator. Those paths are container-internal, not host filesystem paths.
+2. Extract absolute path tokens from the sanitized command via regex (`/[^\s;|&]*`).
+3. Resolve and check each candidate against boundary.
+4. `deny` if any candidate is out of bounds.
+5. Emit `user_message` warning when the command contains patterns that defeat static analysis: `$(...)`, backticks, `${...}`, `eval`, `source`, `exec`, or assignments to path variables.
+6. By default, do **not** deny ambiguous commands (would block too many legitimate cases). A `bash_strict_mode: true` config option escalates this to `deny`.
+
+### Default read allowlist
+
+`/dev/` is included in the default read allowlist alongside `/tmp/`, `/usr/`, `/lib/`, etc. This permits redirects to `/dev/null` and reads from device nodes without configuration. Note: `/dev/stderr` and `/dev/stdout` are symlinks to `/proc/self/fd/N` and resolve outside `/dev/` when `resolve_symlinks: true`.
 
 ### Documented bypass vectors (must be in module README)
 

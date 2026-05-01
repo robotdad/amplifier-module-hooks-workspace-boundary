@@ -36,9 +36,17 @@ This is a **hook module** (one of Amplifier's 5 module types) that subscribes to
 
 This repo contains the module only. A companion bundle (`amplifier-bundle-workspace-boundary`) provides the composition layer: behavior YAML, agent context instructions, and module source reference. The module can also be referenced directly from any bundle via `source: git+https://...`.
 
-### Known Bash Limitations
+### Bash Scope
 
-The hook cannot fully sandbox bash semantics. It extracts absolute path tokens via regex and checks them against the boundary, but these patterns bypass static analysis:
+The hook enforces **filesystem** boundaries. It does not intercept network access, container-internal paths, or non-filesystem tokens.
+
+**Pre-filters** strip tokens that are not host filesystem paths before boundary checking:
+
+- **URLs** (`scheme://...`) — `curl http://host:3000/admin/pages` does not block on `/admin/pages`
+- **Container exec** (`docker exec`, `incus exec`, `kubectl exec`, `amplifier-digital-twin exec`, etc.) — paths after the `--` separator are container-internal and are not checked against the host boundary
+- **Device nodes** — `/dev/null`, `/dev/stdout`, etc. are on the default read allowlist
+
+**Known dynamic bypass vectors** (cannot be blocked without OS-level sandboxing):
 
 - `CMD=/outside/path; cat $CMD`
 - `$(find / -name secret)`
@@ -102,7 +110,7 @@ extra_write_roots:
 
 ### Unit Tests
 
-163 unit tests covering boundary checks, bash parsing, config loading (including user config files), mount registration, enforcement modes, fail-closed behavior, and unknown tool handling.
+184 unit tests covering boundary checks, bash parsing (including URL and container exec pre-filters), config loading (including user config files), mount registration, enforcement modes, fail-closed behavior, and unknown tool handling.
 
 ```bash
 # Clone and set up
@@ -161,8 +169,9 @@ amplifier-digital-twin exec hooks-boundary-test -- \
 | `/home/user/.ssh/id_rsa` | read | DENY |
 | `/etc/passwd` | read | DENY |
 | `/workspace/test-project/../decoy-project/secret.txt` | read | DENY (traversal caught) |
+| `/dev/null` | read | ALLOW (device allowlist) |
 
-Plus 6 bash-parser checks confirming path extraction and ambiguous-pattern detection.
+Plus 15 bash-parser checks: path extraction, ambiguous-pattern detection, URL pre-filter (4 cases), and container exec pre-filter (5 cases).
 
 **Interactive access:**
 
