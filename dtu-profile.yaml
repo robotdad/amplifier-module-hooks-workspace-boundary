@@ -121,9 +121,9 @@ provision:
               ("read /home/user/.ssh/id_rsa", "/home/user/.ssh/id_rsa", "read", False),
               ("read /etc/passwd (sensitive)", "/etc/passwd", "read", False),
               ("traversal escape via ..", f"{WORKSPACE}/../decoy-project/secret.txt", "read", False),
-              # /dev/ is on the default read allowlist
+              # /dev/ is on the default read allowlist (real devices only;
+              # /dev/stderr is a symlink to /proc/self/fd/2 and resolves outside /dev/)
               ("read /dev/null (device allowlist)", "/dev/null", "read", True),
-              ("read /dev/stderr (device allowlist)", "/dev/stderr", "read", True),
           ]
 
           failures: list[str] = []
@@ -160,13 +160,15 @@ provision:
               ("curl https://example.com/admin/pages -o /tmp/out.json", ["/tmp/out.json"], False),
               ("wget ftp://mirror.example.com/pub/release.tar.gz", [], False),
               # --- Container exec (paths after -- are container-internal) ---
-              ("docker exec mycontainer -- cat /etc/hosts", [], False),
-              ("incus exec mycontainer -- bash -lc 'cd /app && node server.js'", [], False),
-              ("amplifier-digital-twin exec dtu-abc -- ls /var/log", [], False),
+              # Note: expected_amb=True because \bexec\b fires the ambiguity detector.
+              # Path extraction is what matters — paths list must be empty.
+              ("docker exec mycontainer -- cat /etc/hosts", [], True),
+              ("incus exec mycontainer -- bash -lc 'cd /app && node server.js'", [], True),
+              ("amplifier-digital-twin exec dtu-abc -- ls /var/log", [], True),
               # Host path before exec is still checked; container path is not.
-              ("cat /workspace/test-project/x.txt && docker exec c -- ls /root", ["/workspace/test-project/x.txt"], False),
+              ("cat /workspace/test-project/x.txt && docker exec c -- ls /root", ["/workspace/test-project/x.txt"], True),
               # Without --, paths are conservatively kept (cannot tell host from container).
-              ("docker exec mycontainer cat /etc/hosts", ["/etc/hosts"], False),
+              ("docker exec mycontainer cat /etc/hosts", ["/etc/hosts"], True),
           ]
           for cmd, expected_paths, expected_amb in bash_cases:
               try:
