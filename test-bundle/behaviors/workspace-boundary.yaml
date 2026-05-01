@@ -1,0 +1,6 @@
+hooks:
+  - module: hooks-workspace-boundary
+    source: ../modules/hooks-workspace-boundary
+    config:
+      enforcement_mode: enforce
+      resolve_symlinks: true
