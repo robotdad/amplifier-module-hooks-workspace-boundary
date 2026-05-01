@@ -24,6 +24,18 @@ import re
 # Stops at whitespace and shell metacharacters to avoid eating operators.
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![.\w])(/[^\s;|&><`'\"()\[\]{}\\]+)")
 
+# Matches URL tokens (scheme://...) so they can be stripped before path
+# extraction.  Covers http, https, ftp, ssh, git, file, and any other
+# <scheme>:// prefix.  Consumes until whitespace or shell metacharacter.
+_URL_RE = re.compile(r"\w+://[^\s;|&><`'\"()\[\]{}\\]*")
+
+# Detects container runtime exec commands.  When one of these precedes a
+# ``--`` separator, everything after ``--`` is a command running *inside*
+# the container and its paths are not host filesystem paths.
+_CONTAINER_EXEC_RE = re.compile(
+    r"\b(?:docker|podman|nerdctl|incus|lxc|kubectl|amplifier-digital-twin)\s+exec\b"
+)
+
 # Patterns that defeat static path analysis, paired with human-readable descriptions.
 # Order matters: more specific patterns before general ones.
 _AMBIGUOUS_PATTERNS: list[tuple[str, str]] = [
@@ -36,8 +48,43 @@ _AMBIGUOUS_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
+def _strip_container_internal(command: str) -> str:
+    """Remove container-internal arguments from exec commands.
+
+    When a container runtime ``exec`` is detected, everything after the
+    ``--`` separator is a command running *inside* the container.  Those
+    paths are container-internal and must not be treated as host
+    filesystem paths.
+
+    Only the portion of the command string after ``--`` (following the
+    matched exec keyword) is removed.  Any host-side commands chained
+    *before* the exec via ``&&``, ``||``, ``;``, or ``|`` are preserved
+    so their paths are still checked.
+    """
+    match = _CONTAINER_EXEC_RE.search(command)
+    if not match:
+        return command
+
+    # Look for ' -- ' after the exec keyword.
+    separator_idx = command.find(" -- ", match.end())
+    if separator_idx < 0:
+        return command
+
+    # Keep everything up to (not including) the separator.
+    return command[:separator_idx]
+
+
 def extract_absolute_paths(command: str) -> list[str]:
     """Extract absolute path tokens from a bash command string via regex.
+
+    Two pre-filters run before path extraction:
+
+    1. **Container exec** — when a container runtime ``exec`` command is
+       detected (docker, podman, incus, kubectl, amplifier-digital-twin,
+       etc.), everything after the ``--`` separator is stripped.  Those
+       paths live inside the container, not on the host filesystem.
+    2. **URLs** — ``scheme://...`` tokens are replaced with whitespace so
+       URL path components are not mistaken for filesystem paths.
 
     Will miss dynamically constructed paths (variable expansion, subshell
     substitution, etc.). Use :func:`detect_ambiguous_patterns` to surface
@@ -51,7 +98,11 @@ def extract_absolute_paths(command: str) -> list[str]:
         or tool paths like ``/usr/bin/cat`` — callers should run them through
         the boundary checker which will allowlist system paths).
     """
-    return _ABSOLUTE_PATH_RE.findall(command)
+    # 1. Strip container-internal arguments (paths after '--' in exec).
+    sanitized = _strip_container_internal(command)
+    # 2. Replace URLs with whitespace so their path components are not extracted.
+    sanitized = _URL_RE.sub(" ", sanitized)
+    return _ABSOLUTE_PATH_RE.findall(sanitized)
 
 
 def detect_ambiguous_patterns(command: str) -> list[tuple[str, str]]:

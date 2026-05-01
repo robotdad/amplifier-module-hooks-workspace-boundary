@@ -96,6 +96,168 @@ class TestExtractAbsolutePaths:
 
 
 # ---------------------------------------------------------------------------
+# URL false-positive prevention (filesystem hook, not network hook)
+# ---------------------------------------------------------------------------
+
+
+class TestURLsNotExtracted:
+    """URLs must not be mistaken for filesystem paths.
+
+    The workspace boundary hook enforces filesystem access.  Network
+    locations (``http://``, ``https://``, ``ftp://``, etc.) are not
+    filesystem paths and must never be fed to the boundary checker.
+    """
+
+    def test_http_url_not_extracted(self) -> None:
+        paths = extract_absolute_paths("curl http://localhost:3000/api/health")
+        assert paths == []
+
+    def test_https_url_not_extracted(self) -> None:
+        paths = extract_absolute_paths("curl https://example.com/admin/pages")
+        assert paths == []
+
+    def test_url_with_ip_and_port(self) -> None:
+        paths = extract_absolute_paths(
+            "agent-browser open http://10.191.237.217:3000/admin/pages"
+        )
+        assert paths == []
+
+    def test_ftp_url_not_extracted(self) -> None:
+        paths = extract_absolute_paths("wget ftp://mirror.example.com/pub/release.tar.gz")
+        assert paths == []
+
+    def test_file_url_not_extracted(self) -> None:
+        paths = extract_absolute_paths("xdg-open file:///home/user/doc.pdf")
+        assert paths == []
+
+    def test_git_ssh_url_not_extracted(self) -> None:
+        paths = extract_absolute_paths(
+            "git clone git+https://github.com/microsoft/amplifier@main"
+        )
+        assert paths == []
+
+    def test_url_mixed_with_real_path(self) -> None:
+        """A command with both a URL and a real filesystem path."""
+        paths = extract_absolute_paths(
+            "curl http://localhost:3000/api/data -o /tmp/output.json"
+        )
+        assert "/tmp/output.json" in paths
+        assert len(paths) == 1
+
+    def test_multiple_urls_stripped(self) -> None:
+        paths = extract_absolute_paths(
+            "curl http://host1/path1 http://host2/path2"
+        )
+        assert paths == []
+
+    def test_url_in_assignment(self) -> None:
+        paths = extract_absolute_paths(
+            'URL="http://10.191.237.217:3000/"'
+        )
+        assert paths == []
+
+    def test_url_in_redirect(self) -> None:
+        """curl with URL and redirect to /dev/null — only /dev/null extracted."""
+        paths = extract_absolute_paths(
+            "curl http://localhost:3000/health 2>/dev/null"
+        )
+        assert "/dev/null" in paths
+        # The URL path component should NOT appear
+        assert not any("health" in p for p in paths)
+        assert not any("localhost" in p for p in paths)
+
+
+# ---------------------------------------------------------------------------
+# Container exec — paths after '--' are container-internal
+# ---------------------------------------------------------------------------
+
+
+class TestContainerExecNotExtracted:
+    """Paths after '--' in container exec commands are container-internal.
+
+    The workspace boundary hook enforces *host* filesystem access.  When
+    a container runtime ``exec`` command is detected, everything after
+    the ``--`` separator runs inside the container — those paths must not
+    be treated as host paths.
+    """
+
+    def test_docker_exec(self) -> None:
+        paths = extract_absolute_paths(
+            "docker exec mycontainer -- cat /etc/hosts"
+        )
+        assert paths == []
+
+    def test_podman_exec(self) -> None:
+        paths = extract_absolute_paths(
+            "podman exec mycontainer -- ls /var/log"
+        )
+        assert paths == []
+
+    def test_incus_exec(self) -> None:
+        paths = extract_absolute_paths(
+            "incus exec mycontainer -- bash -lc 'cd /app && node server.js'"
+        )
+        assert paths == []
+
+    def test_kubectl_exec(self) -> None:
+        paths = extract_absolute_paths(
+            "kubectl exec mypod -- cat /etc/config/settings.yaml"
+        )
+        assert paths == []
+
+    def test_amplifier_digital_twin_exec(self) -> None:
+        paths = extract_absolute_paths(
+            "amplifier-digital-twin exec dtu-35c496a0 -- bash -lc "
+            "'cd /app && node scripts/populate-persona-api.js sarah-chen'"
+        )
+        assert paths == []
+
+    def test_host_path_before_exec_still_checked(self) -> None:
+        """Host-side paths chained before the exec must still be extracted."""
+        paths = extract_absolute_paths(
+            "cat /workspace/config.json && docker exec c -- cat /etc/hosts"
+        )
+        assert "/workspace/config.json" in paths
+        # Container-internal path must not appear
+        assert "/etc/hosts" not in paths
+
+    def test_exec_without_separator_not_stripped(self) -> None:
+        """Without '--', we can't tell where container args begin — keep all."""
+        paths = extract_absolute_paths(
+            "docker exec mycontainer cat /etc/hosts"
+        )
+        # Without '--' we conservatively keep the path
+        assert "/etc/hosts" in paths
+
+    def test_nerdctl_exec(self) -> None:
+        paths = extract_absolute_paths(
+            "nerdctl exec builder -- make -C /build install"
+        )
+        assert paths == []
+
+    def test_lxc_exec(self) -> None:
+        paths = extract_absolute_paths(
+            "lxc exec mycontainer -- ls /root"
+        )
+        assert paths == []
+
+    def test_exec_with_flags(self) -> None:
+        """Docker exec with -it flags before the container name."""
+        paths = extract_absolute_paths(
+            "docker exec -it mycontainer -- bash -c 'ls /var/log'"
+        )
+        assert paths == []
+
+    def test_exec_combined_with_url(self) -> None:
+        """Container exec + URL — both filters must apply."""
+        paths = extract_absolute_paths(
+            "amplifier-digital-twin exec dtu-abc -- "
+            "curl http://localhost:3000/api/health"
+        )
+        assert paths == []
+
+
+# ---------------------------------------------------------------------------
 # detect_ambiguous_patterns
 # ---------------------------------------------------------------------------
 

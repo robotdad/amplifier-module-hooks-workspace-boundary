@@ -44,6 +44,7 @@ _DEFAULT_READ_ALLOWLIST: list[str] = [
     os.path.expanduser("~/.ssh/known_hosts"),
     "/tmp/",
     "/var/tmp/",
+    "/dev/",
     "/etc/hosts",
     "/etc/resolv.conf",
     "/usr/",
