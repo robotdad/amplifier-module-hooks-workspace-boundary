@@ -358,9 +358,35 @@ Fine-grained permission for specific paths without full workspace root status.
 
 Escalates the `bash` ambiguity warnings into denials for high-security contexts.
 
+### Tertiary: User config files (`workspace-boundary.yaml`)
+
+Users can contribute additional safe directories without editing the bundle YAML by placing a `workspace-boundary.yaml` file at two levels:
+
+| Level | Path | Scope |
+|-------|------|-------|
+| Global | `~/.amplifier/workspace-boundary.yaml` | All workspaces on this machine |
+| Workspace | `{workspace_root}/.amplifier/workspace-boundary.yaml` | This project only |
+
+**Accepted keys (path-extension only):**
+- `extra_workspace_roots` — full read+write access
+- `extra_read_roots` — read-only access
+- `extra_write_roots` — write access
+
+**Security constraint:** `enforcement_mode`, `resolve_symlinks`, `bash_strict_mode`, and `strict_unknown_tools` are **not accepted** from user config files. These are bundle-author-only. If present, they are rejected with a warning log and silently ignored.
+
+**Merge semantics:** All three sources (global user config, workspace user config, bundle YAML config) are merged additively. Paths from any source are combined and deduplicated. No source can remove paths declared by another.
+
+**Timing:** User config files are read by `_load_user_config()` during `resolve_boundary()`, which runs once at `mount()` time. They are never re-read mid-session. Changes take effect only on session boundaries — this preserves the static-at-mount-time security guarantee.
+
+**Auditability:** `BoundaryConfig.user_config_sources` records for each config file checked: path, whether it loaded, how many paths it contributed, and any error. The hook logs this at INFO level. This supports incident investigation ("which user config files were active when the boundary allowed this access?").
+
+**Failure handling:** Missing files are silently skipped (expected case). Malformed YAML logs a warning and returns empty (session still starts). Non-mapping YAML, non-list values, and non-string entries are each warned and skipped individually. User config loading failures reduce the boundary (fewer allowed paths) rather than widening it — consistent with the fail-closed philosophy.
+
+**Implementation:** `config.py` functions `_load_user_config(path)` and `_user_config_paths(workspace_root)`. Uses PyYAML (`yaml.safe_load`) with graceful fallback if PyYAML is not available (debug log, skip user config loading entirely).
+
 ### Explicitly NOT recommended: runtime mode toggle
 
-A `/mode permissive` runtime escape is an anti-pattern for security hooks — it lets the agent disable its own guardrail. If cross-boundary access is needed, configure it in the mount plan before session start.
+A `/mode permissive` runtime escape is an anti-pattern for security hooks — it lets the agent disable its own guardrail. If cross-boundary access is needed, configure it in the mount plan before session start, or use a user config file (`workspace-boundary.yaml`) at the global or workspace level.
 
 ## §13 — Observable Events
 

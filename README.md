@@ -67,11 +67,42 @@ hooks:
 
 **Zero-config default:** If no `workspace_root` is set, the hook captures the process CWD at mount time. For sessions launched from a project directory, this Just Works.
 
+### User Config Files
+
+Users can declare additional safe directories without editing the bundle YAML by placing a `workspace-boundary.yaml` file at either or both levels:
+
+| Level | Path | Scope |
+|-------|------|-------|
+| Global | `~/.amplifier/workspace-boundary.yaml` | All workspaces on this machine |
+| Workspace | `.amplifier/workspace-boundary.yaml` | This workspace only |
+
+**Accepted keys** (path-extension only):
+
+```yaml
+# ~/.amplifier/workspace-boundary.yaml (global)
+extra_read_roots:
+  - ~/shared-datasets
+
+# .amplifier/workspace-boundary.yaml (workspace-level)
+extra_workspace_roots:
+  - ~/Work/shared-libs
+extra_write_roots:
+  - /mnt/output
+```
+
+**Merge behavior:** All three layers (global user config, workspace user config, bundle YAML config) are additive. Paths from any layer are merged together and deduplicated. No layer can remove paths declared by another.
+
+**Security:** Only `extra_workspace_roots`, `extra_read_roots`, and `extra_write_roots` are accepted from user config files. Security-sensitive keys (`enforcement_mode`, `resolve_symlinks`, `bash_strict_mode`, `strict_unknown_tools`) are bundle-author-only — they are rejected with a warning if found in user config files.
+
+**Timing:** User config files are read once at mount time. Changes take effect only when a new session starts, preserving the static-at-mount-time security guarantee.
+
+**Auditability:** The `user_config_sources` field on `BoundaryConfig` records which files were checked, whether they loaded successfully, and how many paths each contributed. The hook logs this at INFO level.
+
 ## Testing
 
 ### Unit Tests
 
-142 unit tests covering boundary checks, bash parsing, config loading, mount registration, enforcement modes, fail-closed behavior, and unknown tool handling.
+163 unit tests covering boundary checks, bash parsing, config loading (including user config files), mount registration, enforcement modes, fail-closed behavior, and unknown tool handling.
 
 ```bash
 # Clone and set up
