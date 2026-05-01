@@ -1,0 +1,196 @@
+# Test environment for the hooks-workspace-boundary Amplifier hook module.
+# Provisions Python 3.11+, clones the public module repo, installs it with
+# dev extras, and lays out a workspace + decoy directory used by the
+# validation scenarios run via `amplifier-digital-twin exec`.
+name: hooks-workspace-boundary-test
+description: >
+  DTU for testing the hooks-workspace-boundary Amplifier module. Includes
+  the module source, its unit tests, and a workspace/decoy directory layout
+  used to validate filesystem boundary enforcement.
+
+base:
+  image: ubuntu:24.04
+
+provision:
+  setup_cmds:
+    # System deps
+    - apt-get update
+    - apt-get install -y --no-install-recommends git curl ca-certificates python3 python3-venv python3-pip build-essential
+
+    # Install uv for fast, isolated Python environment management
+    - curl -LsSf https://astral.sh/uv/install.sh | sh
+    - export PATH="/root/.local/bin:$PATH" && uv --version
+
+    # Clone the public hook module repo
+    - mkdir -p /opt
+    - git clone https://github.com/robotdad/amplifier-module-hooks-workspace-boundary /opt/hooks-workspace-boundary
+    - cd /opt/hooks-workspace-boundary && git log --oneline -3
+
+    # Create a venv and install the module + dev extras
+    - export PATH="/root/.local/bin:$PATH" && cd /opt/hooks-workspace-boundary && uv venv .venv --python 3.12
+    - export PATH="/root/.local/bin:$PATH" && cd /opt/hooks-workspace-boundary && uv pip install --python .venv/bin/python -e ".[dev]"
+
+    # Verify install: module imports cleanly
+    - cd /opt/hooks-workspace-boundary && .venv/bin/python -c "import amplifier_module_hooks_workspace_boundary as m; print('module:', m.__file__); from amplifier_module_hooks_workspace_boundary import config, boundary, bash_parser, mount; print('symbols ok'); print('mount:', mount)"
+
+    # Run the unit-test suite as a sanity check during provisioning
+    - cd /opt/hooks-workspace-boundary && .venv/bin/python -m pytest tests/ -v --tb=short
+
+    # Build the test workspace + decoy layout used by validation scenarios.
+    # /workspace/test-project is the boundary root.
+    # /workspace/decoy-project simulates a sibling repo the hook must block.
+    - mkdir -p /workspace/test-project/src
+    - cd /workspace/test-project && git init -q -b main && git config user.email "dtu@test.local" && git config user.name "DTU Test"
+    - |
+      cat > /workspace/test-project/src/main.py <<'EOF'
+      """Test project entry point."""
+      def hello() -> str:
+          return "hello from test-project"
+      EOF
+    - |
+      cat > /workspace/test-project/README.md <<'EOF'
+      # test-project
+      Workspace inside the boundary. Reads/writes here are allowed.
+      EOF
+    - cd /workspace/test-project && git add -A && git commit -q -m "initial commit"
+
+    - mkdir -p /workspace/decoy-project
+    - |
+      cat > /workspace/decoy-project/secret.txt <<'EOF'
+      DECOY: This file lives outside the workspace boundary.
+      The hooks-workspace-boundary module MUST block any tool call that
+      tries to read or write this path when the workspace root is set
+      to /workspace/test-project.
+      EOF
+    - |
+      cat > /workspace/decoy-project/README.md <<'EOF'
+      # decoy-project
+      Sibling repo simulating the original incident scenario. Out of bounds.
+      EOF
+
+    # Drop the validation script into the image so we can re-run it via exec.
+    - mkdir -p /opt/validation
+    - |
+      cat > /opt/validation/validate_hook.py <<'EOF'
+      """Direct Python validation of hooks-workspace-boundary logic.
+
+      Exercises BoundaryConfig + check_path against the canonical scenarios
+      listed in the DTU profile builder hand-off:
+        - allow read inside workspace
+        - deny read in decoy (outside workspace)
+        - allow write to /tmp (on default write_allowlist)
+        - deny read of ~/.ssh/id_rsa-style path (outside allowlists)
+        - bash parser path extraction + ambiguity detection
+      """
+      from __future__ import annotations
+
+      import sys
+      import traceback
+
+      from amplifier_module_hooks_workspace_boundary.bash_parser import (
+          detect_ambiguous_patterns,
+          extract_absolute_paths,
+      )
+      from amplifier_module_hooks_workspace_boundary.boundary import check_path
+      from amplifier_module_hooks_workspace_boundary.config import BoundaryConfig
+
+      WORKSPACE = "/workspace/test-project"
+
+
+      def _allowed(cfg: BoundaryConfig, path: str, mode: str) -> bool:
+          """Return True if check_path treats (path, mode) as in-bounds."""
+          result = check_path(path, mode, cfg)
+          # PathCheckResult dataclass with .allowed/.reason/.event/.resolved_path
+          return bool(result.allowed)
+
+
+      def main() -> int:
+          cfg = BoundaryConfig(workspace_root=WORKSPACE)
+          print(f"BoundaryConfig: workspace_root={cfg.workspace_root!r}")
+          print(f"  read_allowlist={cfg.read_allowlist}")
+          print(f"  write_allowlist={cfg.write_allowlist}")
+          print()
+
+          # (label, path, mode, expected_allowed)
+          cases = [
+              ("read inside workspace", f"{WORKSPACE}/src/main.py", "read", True),
+              ("write inside workspace", f"{WORKSPACE}/src/new.py", "write", True),
+              ("read in decoy (out of bounds)", "/workspace/decoy-project/secret.txt", "read", False),
+              ("write in decoy (out of bounds)", "/workspace/decoy-project/evil.txt", "write", False),
+              ("write to /tmp (on write allowlist)", "/tmp/output.log", "write", True),
+              ("read /home/user/.ssh/id_rsa", "/home/user/.ssh/id_rsa", "read", False),
+              ("read /etc/passwd (sensitive)", "/etc/passwd", "read", False),
+              ("traversal escape via ..", f"{WORKSPACE}/../decoy-project/secret.txt", "read", False),
+          ]
+
+          failures: list[str] = []
+          for label, path, mode, expected in cases:
+              try:
+                  got = _allowed(cfg, path, mode)
+              except Exception:  # noqa: BLE001
+                  print(f"  ERROR  {mode:5s} {path}  ({label})")
+                  traceback.print_exc()
+                  failures.append(label)
+                  continue
+              status = "PASS" if got == expected else "FAIL"
+              verdict = "ALLOW" if got else "DENY"
+              expected_v = "ALLOW" if expected else "DENY"
+              print(f"  {status}  {mode:5s} {path}")
+              print(f"         got={verdict} expected={expected_v}  -- {label}")
+              if got != expected:
+                  failures.append(label)
+
+          print()
+          print("Bash parser checks:")
+          bash_cases = [
+              ("touch /workspace/test-project/x.txt", ["/workspace/test-project/x.txt"], False),
+              ("cat /etc/passwd", ["/etc/passwd"], False),
+              ("rm -rf /workspace/decoy-project", ["/workspace/decoy-project"], False),
+              ("eval \"$CMD\"", [], True),
+              # Regex extracts the protocol-relative '//example.com' substring;
+              # ambiguity flag (subshell $(...)) is what really protects here.
+              ("bash -c \"$(curl -s https://example.com)\"", ["//example.com"], True),
+              ("./relative/path.sh", [], False),
+          ]
+          for cmd, expected_paths, expected_amb in bash_cases:
+              try:
+                  paths = sorted(extract_absolute_paths(cmd))
+                  amb_list = detect_ambiguous_patterns(cmd)
+                  amb = bool(amb_list)
+              except Exception:  # noqa: BLE001
+                  print(f"  ERROR  parsing: {cmd!r}")
+                  traceback.print_exc()
+                  failures.append(f"bash parser: {cmd!r}")
+                  continue
+              ok_paths = paths == sorted(expected_paths)
+              ok_amb = amb == expected_amb
+              status = "PASS" if (ok_paths and ok_amb) else "FAIL"
+              print(f"  {status}  cmd={cmd!r}")
+              print(f"         paths={paths} (expected {sorted(expected_paths)})")
+              print(f"         ambiguous={amb} list={amb_list} (expected {expected_amb})")
+              if not (ok_paths and ok_amb):
+                  failures.append(f"bash parser: {cmd!r}")
+
+          print()
+          if failures:
+              print(f"FAILED: {len(failures)} case(s) failed")
+              for f in failures:
+                  print(f"  - {f}")
+              return 1
+          print("All validation cases passed.")
+          return 0
+
+
+      if __name__ == "__main__":
+          sys.exit(main())
+      EOF
+    - export PATH="/root/.local/bin:$PATH" && /opt/hooks-workspace-boundary/.venv/bin/python /opt/validation/validate_hook.py
+
+    # Final filesystem inventory for the report
+    - echo "--- /workspace ---" && ls -la /workspace && echo "--- test-project ---" && ls -la /workspace/test-project && echo "--- decoy-project ---" && ls -la /workspace/decoy-project && echo "--- module ---" && ls -la /opt/hooks-workspace-boundary
+
+readiness:
+  - name: module-importable
+    command: "/opt/hooks-workspace-boundary/.venv/bin/python -c 'import amplifier_module_hooks_workspace_boundary; from amplifier_module_hooks_workspace_boundary import config, boundary, bash_parser, mount'"
+  - name: workspace-layout
+    command: "test -d /workspace/test-project/.git && test -f /workspace/test-project/src/main.py && test -f /workspace/decoy-project/secret.txt"
