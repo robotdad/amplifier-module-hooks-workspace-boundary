@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from amplifier_module_hooks_workspace_boundary.bash_parser import (
     detect_ambiguous_patterns,
@@ -89,7 +88,9 @@ class TestExtractAbsolutePaths:
         assert "/dev/null" in paths
 
     def test_multiple_commands_on_one_line(self) -> None:
-        paths = extract_absolute_paths("mkdir /workspace/build; cp /src/main.py /workspace/build/")
+        paths = extract_absolute_paths(
+            "mkdir /workspace/build; cp /src/main.py /workspace/build/"
+        )
         # Should find all three path references
         assert any("/workspace/build" in p for p in paths)
         assert any("/src/main.py" in p for p in paths)
@@ -123,7 +124,9 @@ class TestURLsNotExtracted:
         assert paths == []
 
     def test_ftp_url_not_extracted(self) -> None:
-        paths = extract_absolute_paths("wget ftp://mirror.example.com/pub/release.tar.gz")
+        paths = extract_absolute_paths(
+            "wget ftp://mirror.example.com/pub/release.tar.gz"
+        )
         assert paths == []
 
     def test_file_url_not_extracted(self) -> None:
@@ -145,22 +148,16 @@ class TestURLsNotExtracted:
         assert len(paths) == 1
 
     def test_multiple_urls_stripped(self) -> None:
-        paths = extract_absolute_paths(
-            "curl http://host1/path1 http://host2/path2"
-        )
+        paths = extract_absolute_paths("curl http://host1/path1 http://host2/path2")
         assert paths == []
 
     def test_url_in_assignment(self) -> None:
-        paths = extract_absolute_paths(
-            'URL="http://10.191.237.217:3000/"'
-        )
+        paths = extract_absolute_paths('URL="http://10.191.237.217:3000/"')
         assert paths == []
 
     def test_url_in_redirect(self) -> None:
         """curl with URL and redirect to /dev/null — only /dev/null extracted."""
-        paths = extract_absolute_paths(
-            "curl http://localhost:3000/health 2>/dev/null"
-        )
+        paths = extract_absolute_paths("curl http://localhost:3000/health 2>/dev/null")
         assert "/dev/null" in paths
         # The URL path component should NOT appear
         assert not any("health" in p for p in paths)
@@ -182,15 +179,11 @@ class TestContainerExecNotExtracted:
     """
 
     def test_docker_exec(self) -> None:
-        paths = extract_absolute_paths(
-            "docker exec mycontainer -- cat /etc/hosts"
-        )
+        paths = extract_absolute_paths("docker exec mycontainer -- cat /etc/hosts")
         assert paths == []
 
     def test_podman_exec(self) -> None:
-        paths = extract_absolute_paths(
-            "podman exec mycontainer -- ls /var/log"
-        )
+        paths = extract_absolute_paths("podman exec mycontainer -- ls /var/log")
         assert paths == []
 
     def test_incus_exec(self) -> None:
@@ -223,22 +216,16 @@ class TestContainerExecNotExtracted:
 
     def test_exec_without_separator_not_stripped(self) -> None:
         """Without '--', we can't tell where container args begin — keep all."""
-        paths = extract_absolute_paths(
-            "docker exec mycontainer cat /etc/hosts"
-        )
+        paths = extract_absolute_paths("docker exec mycontainer cat /etc/hosts")
         # Without '--' we conservatively keep the path
         assert "/etc/hosts" in paths
 
     def test_nerdctl_exec(self) -> None:
-        paths = extract_absolute_paths(
-            "nerdctl exec builder -- make -C /build install"
-        )
+        paths = extract_absolute_paths("nerdctl exec builder -- make -C /build install")
         assert paths == []
 
     def test_lxc_exec(self) -> None:
-        paths = extract_absolute_paths(
-            "lxc exec mycontainer -- ls /root"
-        )
+        paths = extract_absolute_paths("lxc exec mycontainer -- ls /root")
         assert paths == []
 
     def test_exec_with_flags(self) -> None:
@@ -255,6 +242,58 @@ class TestContainerExecNotExtracted:
             "curl http://localhost:3000/api/health"
         )
         assert paths == []
+
+
+# ---------------------------------------------------------------------------
+# Glob pattern false-positive prevention
+# ---------------------------------------------------------------------------
+
+
+class TestGlobPatternsNotExtracted:
+    """Glob patterns in flag arguments must not be treated as filesystem paths.
+
+    Commands like ``find -path``, ``grep --include``, and ``rsync --exclude``
+    accept glob patterns containing ``*`` and ``?``.  These are never real
+    absolute filesystem paths and must be filtered out.
+    """
+
+    def test_find_path_glob_not_extracted(self) -> None:
+        """The original false-positive: find -path '*/validation/*d5d*'."""
+        paths = extract_absolute_paths(
+            "find /home/user/Work/feedback -path '*/validation/*d5d*' "
+            "-o -path '*/validation/*D5d*'"
+        )
+        assert "/home/user/Work/feedback" in paths
+        assert len(paths) == 1
+
+    def test_find_name_glob_not_extracted(self) -> None:
+        paths = extract_absolute_paths("find /workspace -name '*.py'")
+        assert "/workspace" in paths
+        assert not any("*.py" in p for p in paths)
+
+    def test_grep_include_glob_not_extracted(self) -> None:
+        paths = extract_absolute_paths("grep --include='*.ts' pattern /src/app")
+        assert "/src/app" in paths
+        assert not any("*" in p for p in paths)
+
+    def test_rsync_exclude_glob_not_extracted(self) -> None:
+        paths = extract_absolute_paths("rsync -av /src/ /dst/ --exclude='*.log'")
+        assert "/src/" in paths
+        assert "/dst/" in paths
+        assert not any("*" in p for p in paths)
+
+    def test_question_mark_glob_not_extracted(self) -> None:
+        paths = extract_absolute_paths("find /tmp -name 'file?.txt'")
+        assert "/tmp" in paths
+        assert not any("?" in p for p in paths)
+
+    def test_real_paths_still_extracted(self) -> None:
+        """Non-glob absolute paths must still be extracted normally."""
+        paths = extract_absolute_paths(
+            "find /workspace/src -path '*/test/*' -exec cat {} +"
+        )
+        assert "/workspace/src" in paths
+        assert not any("*" in p for p in paths)
 
 
 # ---------------------------------------------------------------------------

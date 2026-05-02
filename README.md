@@ -44,6 +44,7 @@ The hook enforces **filesystem** boundaries. It does not intercept network acces
 
 - **URLs** (`scheme://...`) — `curl http://host:3000/admin/pages` does not block on `/admin/pages`
 - **Container exec** (`docker exec`, `incus exec`, `kubectl exec`, `amplifier-digital-twin exec`, etc.) — paths after the `--` separator are container-internal and are not checked against the host boundary
+- **Glob patterns** — tokens containing `*` or `?` are discarded after extraction. Real filesystem paths never contain glob metacharacters; these appear in flag arguments like `find -path '*/foo/*'`, `grep --include='*.py'`, `rsync --exclude='*.log'`
 - **Device nodes** — `/dev/null`, `/dev/stdout`, etc. are on the default read allowlist
 
 **Known dynamic bypass vectors** (cannot be blocked without OS-level sandboxing):
@@ -110,7 +111,7 @@ extra_write_roots:
 
 ### Unit Tests
 
-184 unit tests covering boundary checks, bash parsing (including URL and container exec pre-filters), config loading (including user config files), mount registration, enforcement modes, fail-closed behavior, and unknown tool handling.
+190 unit tests covering boundary checks, bash parsing (including URL, container exec, and glob pattern filters), config loading (including user config files), mount registration, enforcement modes, fail-closed behavior, and unknown tool handling.
 
 ```bash
 # Clone and set up
@@ -171,7 +172,7 @@ amplifier-digital-twin exec hooks-boundary-test -- \
 | `/workspace/test-project/../decoy-project/secret.txt` | read | DENY (traversal caught) |
 | `/dev/null` | read | ALLOW (device allowlist) |
 
-Plus 15 bash-parser checks: path extraction, ambiguous-pattern detection, URL pre-filter (4 cases), and container exec pre-filter (5 cases).
+Plus 21 bash-parser checks: path extraction, ambiguous-pattern detection, URL pre-filter (4 cases), container exec pre-filter (5 cases), and glob pattern post-filter (6 cases).
 
 **Interactive access:**
 

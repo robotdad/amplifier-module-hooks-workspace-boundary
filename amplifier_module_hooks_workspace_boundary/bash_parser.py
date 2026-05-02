@@ -102,7 +102,12 @@ def extract_absolute_paths(command: str) -> list[str]:
     sanitized = _strip_container_internal(command)
     # 2. Replace URLs with whitespace so their path components are not extracted.
     sanitized = _URL_RE.sub(" ", sanitized)
-    return _ABSOLUTE_PATH_RE.findall(sanitized)
+    # 3. Extract candidate paths, then discard glob patterns.
+    #    Real absolute paths never contain '*' or '?'.  These characters
+    #    appear in flag arguments like ``find -path '*/foo/*'`` or
+    #    ``grep --include='*.py'`` and are not filesystem targets.
+    candidates = _ABSOLUTE_PATH_RE.findall(sanitized)
+    return [p for p in candidates if "*" not in p and "?" not in p]
 
 
 def detect_ambiguous_patterns(command: str) -> list[tuple[str, str]]:

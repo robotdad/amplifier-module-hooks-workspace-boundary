@@ -180,10 +180,11 @@ This is the hard part. The hook can reject `bash` calls before execution but can
    - **URLs** — replace `scheme://...` tokens with whitespace so URL path components (e.g. `/admin/pages` in `http://host/admin/pages`) are not extracted.
    - **Container exec** — when a container runtime `exec` command is detected (`docker`, `podman`, `incus`, `kubectl`, `nerdctl`, `lxc`, `amplifier-digital-twin`), strip everything after the `--` separator. Those paths are container-internal, not host filesystem paths.
 2. Extract absolute path tokens from the sanitized command via regex (`/[^\s;|&]*`).
-3. Resolve and check each candidate against boundary.
-4. `deny` if any candidate is out of bounds.
-5. Emit `user_message` warning when the command contains patterns that defeat static analysis: `$(...)`, backticks, `${...}`, `eval`, `source`, `exec`, or assignments to path variables.
-6. By default, do **not** deny ambiguous commands (would block too many legitimate cases). A `bash_strict_mode: true` config option escalates this to `deny`.
+3. **Post-filter: discard glob patterns** — remove any extracted token containing `*` or `?`. Real filesystem paths never contain these characters; their presence indicates a shell glob pattern passed as a flag argument (e.g. `find -path '*/foo/*'`, `grep --include='*.py'`, `rsync --exclude='*.log'`), not a path to check.
+4. Resolve and check each remaining candidate against boundary.
+5. `deny` if any candidate is out of bounds.
+6. Emit `user_message` warning when the command contains patterns that defeat static analysis: `$(...)`, backticks, `${...}`, `eval`, `source`, `exec`, or assignments to path variables.
+7. By default, do **not** deny ambiguous commands (would block too many legitimate cases). A `bash_strict_mode: true` config option escalates this to `deny`.
 
 ### Default read allowlist
 
@@ -434,6 +435,7 @@ Use `TestCoordinator` and `EventRecorder` from `amplifier_core.testing`. Require
 | `..` traversal escaping boundary | `action="deny"` |
 | Symlink resolving outside (resolve_symlinks=true) | `action="deny"` |
 | Bash with explicit out-of-boundary path | `action="deny"` |
+| Bash with glob patterns (`find -path '*/foo/*'`, `grep --include='*.py'`) | `action="continue"` (glob tokens discarded, not checked) |
 | Bash with `$VAR` paths | `action="continue"` + `user_message` warning |
 | Bash with `eval` | `action="continue"` + `user_message` warning |
 | Bash with `$(...)` | `action="continue"` + `user_message` warning |
