@@ -22,8 +22,10 @@ import re
 # relative tokens like ./path, ~/path, or word/path.
 # Uses a negative lookbehind (?<![.~\w]) so that /setup.sh in ./setup.sh
 # and /Work/project in ~/Work/project are not extracted as absolute paths.
-# Stops at whitespace and shell metacharacters to avoid eating operators.
-_ABSOLUTE_PATH_RE = re.compile(r"(?<![.~\w])(/[^\s;|&><`'\"()\[\]{}\\]+)")
+# Stops at whitespace, shell metacharacters, and colons to avoid eating
+# operators and colon-separated constructs (Docker bind mounts like
+# /host/path:/container/path:ro, PATH variables, etc.).
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![.~\w])(/[^\s;|&><`'\"()\[\]{}\\:]+)")
 
 # Matches tilde-prefixed path tokens (~/...).  The shell expands these to
 # absolute paths at runtime.  Extracted separately and expanded via
@@ -132,7 +134,9 @@ def extract_absolute_paths(command: str) -> list[str]:
     #    appear in flag arguments like ``find -path '*/foo/*'`` or
     #    ``grep --include='*.py'`` and are not filesystem targets.
     candidates = _ABSOLUTE_PATH_RE.findall(sanitized)
-    absolute = [p for p in candidates if "*" not in p and "?" not in p]
+    absolute = [
+        p for p in candidates if "*" not in p and "?" not in p and p.rstrip("/") != ""
+    ]
     # 5. Extract tilde-prefixed paths and expand to absolute paths.
     #    Without this step, ~/Work/topologies bypasses the boundary entirely
     #    because the negative lookbehind in _ABSOLUTE_PATH_RE excludes them.

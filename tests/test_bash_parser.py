@@ -298,6 +298,105 @@ class TestGlobPatternsNotExtracted:
 
 
 # ---------------------------------------------------------------------------
+# Colon-separated path false-positive prevention (Docker -v, PATH, etc.)
+# ---------------------------------------------------------------------------
+
+
+class TestColonSeparatedNotMerged:
+    """Colon-separated constructs must not merge into a single path token.
+
+    Docker bind mounts (``-v /host:/container:ro``), PATH variables
+    (``PATH=/usr/bin:/usr/local/bin``), and similar colon-separated strings
+    must be split at the colon so each component is checked independently.
+    """
+
+    def test_docker_bind_mount_splits(self) -> None:
+        """Docker -v host:container:options must extract host and container separately."""
+        paths = extract_absolute_paths(
+            "docker run -v /home/user/bin/gh:/usr/local/bin/gh:ro myimage"
+        )
+        assert "/home/user/bin/gh" in paths
+        assert "/usr/local/bin/gh" in paths
+        # The merged form must NOT appear
+        assert not any(":" in p for p in paths)
+
+    def test_docker_bind_mount_config_dir(self) -> None:
+        paths = extract_absolute_paths(
+            "docker run -v /home/user/.config/gh:/home/user/.config/gh:ro img"
+        )
+        assert "/home/user/.config/gh" in paths
+        assert not any(":" in p for p in paths)
+
+    def test_path_variable_splits(self) -> None:
+        """PATH=/usr/bin:/usr/local/bin must extract both components."""
+        paths = extract_absolute_paths(
+            "export PATH=/usr/bin:/usr/local/bin:/home/user/bin"
+        )
+        assert "/usr/bin" in paths
+        assert "/usr/local/bin" in paths
+        assert "/home/user/bin" in paths
+        assert not any(":" in p for p in paths)
+
+    def test_python_string_with_bind_mount(self) -> None:
+        """Python code generating bind mount specs — the original incident."""
+        paths = extract_absolute_paths(
+            """python3 -c "mount = '/host/path:/container/path:ro'" """
+        )
+        # Each path component is extracted separately (after quote stripping)
+        assert not any(":" in p for p in paths)
+
+    def test_classpath_splits(self) -> None:
+        paths = extract_absolute_paths(
+            "java -cp /opt/lib/a.jar:/opt/lib/b.jar Main"
+        )
+        assert "/opt/lib/a.jar" in paths
+        assert "/opt/lib/b.jar" in paths
+        assert not any(":" in p for p in paths)
+
+    def test_normal_paths_unaffected(self) -> None:
+        """Paths without colons must still be extracted normally."""
+        paths = extract_absolute_paths("cat /etc/hosts /tmp/data.txt")
+        assert "/etc/hosts" in paths
+        assert "/tmp/data.txt" in paths
+
+
+# ---------------------------------------------------------------------------
+# Root path false-positive prevention (jq //, empty strings)
+# ---------------------------------------------------------------------------
+
+
+class TestRootPathNotExtracted:
+    """Bare root path '/' or '//' must not be extracted as a candidate.
+
+    The jq null-coalescing operator ``//`` and escaped empty string
+    literals can produce '/' or '//' tokens that normalize to the root
+    directory, causing false boundary denials on every workspace.
+    """
+
+    def test_jq_double_slash_not_extracted(self) -> None:
+        """jq's // null-coalescing operator must not yield a path."""
+        paths = extract_absolute_paths(
+            """jq '.data // null' /tmp/input.json"""
+        )
+        assert "/tmp/input.json" in paths
+        assert "/" not in paths
+        assert "//" not in paths
+
+    def test_bare_slash_not_extracted(self) -> None:
+        paths = extract_absolute_paths("echo /")
+        assert paths == []
+
+    def test_double_slash_not_extracted(self) -> None:
+        paths = extract_absolute_paths("echo //")
+        assert paths == []
+
+    def test_trailing_slash_path_still_extracted(self) -> None:
+        """Paths with trailing slashes are fine — only bare / is filtered."""
+        paths = extract_absolute_paths("ls /tmp/")
+        assert "/tmp/" in paths
+
+
+# ---------------------------------------------------------------------------
 # Message-flag false-positive prevention (git commit -m, etc.)
 # ---------------------------------------------------------------------------
 
