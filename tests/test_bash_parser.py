@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 
 from amplifier_module_hooks_workspace_boundary.bash_parser import (
     detect_ambiguous_patterns,
@@ -378,56 +379,95 @@ class TestMessageFlagContentNotExtracted:
 # ---------------------------------------------------------------------------
 
 
-class TestTildePathsNotExtracted:
-    """Tilde-prefixed paths (~/...) must not have their suffix extracted.
+class TestTildePathsExtracted:
+    """Tilde-prefixed paths (~/...) must be expanded and extracted.
 
-    The shell expands ``~/path`` to ``/home/user/path``, but the regex
-    sees ``~`` followed by ``/path`` and — without the tilde in the
-    lookbehind — would extract ``/path`` as an absolute path candidate.
-    This produces false positives because ``/path`` is not the intended
-    filesystem target.
+    The shell expands ``~/path`` to ``/home/user/path`` at runtime.
+    The parser must extract these and expand them via ``os.path.expanduser()``
+    so they are checked against the workspace boundary.  Without this,
+    ``~/Work/topologies`` bypasses the boundary entirely.
+
+    The suffix (``/path``) must NOT be extracted as a bare absolute path —
+    only the fully expanded ``/home/user/path`` form.
     """
 
-    def test_tilde_home_path_not_extracted(self) -> None:
-        """Standalone ~/path should not extract /path."""
+    def test_tilde_home_path_extracted(self) -> None:
+        """Standalone ~/path should be expanded and extracted."""
         paths = extract_absolute_paths("ls ~/Documents")
-        assert paths == []
+        home = os.path.expanduser("~")
+        assert f"{home}/Documents" in paths
 
     def test_cp_from_tilde_to_workspace(self) -> None:
-        """Only the real absolute destination should be extracted."""
+        """Both the expanded tilde source and absolute destination extracted."""
         paths = extract_absolute_paths("cp ~/data/file.csv /workspace/results/")
+        home = os.path.expanduser("~")
         assert "/workspace/results/" in paths
-        assert len(paths) == 1
+        assert f"{home}/data/file.csv" in paths
 
     def test_rsync_tilde_source(self) -> None:
         paths = extract_absolute_paths("rsync ~/project/ /workspace/backup/")
+        home = os.path.expanduser("~")
         assert "/workspace/backup/" in paths
-        assert not any("project" in p for p in paths)
+        assert f"{home}/project/" in paths
 
     def test_scp_remote_tilde(self) -> None:
-        """scp with remote ~/path — neither the remote path nor tilde suffix extracted."""
+        """scp with remote user@host:~/path — the colon-prefixed tilde is not
+        a local tilde path and must not be extracted."""
         paths = extract_absolute_paths("scp user@host:~/config.yaml /workspace/")
         assert "/workspace/" in paths
-        assert not any("config.yaml" in p for p in paths)
+        # The remote tilde path follows a word char (colon-less host:~ pattern
+        # has ~ preceded by ':' which the lookbehind allows, but the 'host'
+        # prefix means the regex won't match).  Only /workspace/ extracted.
+        home = os.path.expanduser("~")
+        assert f"{home}/config.yaml" not in paths
 
     def test_ssh_cat_remote_tilde(self) -> None:
-        """ssh host 'cat ~/file' — the remote ~/file is not a host path."""
+        """ssh host 'cat ~/file' — the tilde inside single quotes is still
+        visible to the regex.  It will be expanded locally, which is
+        conservative (may false-positive on remote paths, but never
+        false-negative on local ones)."""
         paths = extract_absolute_paths("ssh host 'cat ~/Work/project/data.csv'")
-        assert paths == []
+        home = os.path.expanduser("~")
+        assert f"{home}/Work/project/data.csv" in paths
 
     def test_cd_tilde(self) -> None:
         paths = extract_absolute_paths("cd ~/Work/project && make build")
-        assert paths == []
+        home = os.path.expanduser("~")
+        assert f"{home}/Work/project" in paths
 
     def test_tilde_nested_deep_path(self) -> None:
         paths = extract_absolute_paths("cat ~/a/b/c/d/e/file.txt")
-        assert paths == []
+        home = os.path.expanduser("~")
+        assert f"{home}/a/b/c/d/e/file.txt" in paths
 
     def test_tilde_mixed_with_absolute(self) -> None:
         """Command with both ~/path and /absolute/path."""
         paths = extract_absolute_paths("diff ~/local/config.yaml /etc/config.yaml")
+        home = os.path.expanduser("~")
         assert "/etc/config.yaml" in paths
-        assert len(paths) == 1
+        assert f"{home}/local/config.yaml" in paths
+
+    def test_bare_tilde_not_extracted(self) -> None:
+        """Bare ~ without a path suffix must not be extracted."""
+        paths = extract_absolute_paths("cd ~")
+        assert paths == []
+
+    def test_tilde_suffix_not_extracted_as_bare_absolute(self) -> None:
+        """The /path suffix of ~/path must not appear as a separate entry."""
+        paths = extract_absolute_paths("ls ~/Work/project")
+        # /Work/project must NOT be in paths (old bug: lookbehind prevented
+        # this, but now the full expanded path should appear instead).
+        assert "/Work/project" not in paths
+
+    def test_tilde_in_message_flag_not_extracted(self) -> None:
+        """Tilde paths inside -m '...' message flags must not be extracted."""
+        paths = extract_absolute_paths("git commit -m 'fix ~/Work/project'")
+        assert paths == []
+
+    def test_tilde_after_container_exec_not_extracted(self) -> None:
+        """Tilde paths after container exec -- must not be extracted."""
+        paths = extract_absolute_paths("docker exec mycontainer -- ls ~/Work/project")
+        assert paths == []
 
 
 # ---------------------------------------------------------------------------

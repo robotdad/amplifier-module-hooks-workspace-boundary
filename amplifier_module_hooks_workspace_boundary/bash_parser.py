@@ -14,6 +14,7 @@ Posture: "Block the obvious, warn on ambiguous."
 
 from __future__ import annotations
 
+import os
 import re
 
 # Matches absolute path tokens starting with '/' that are NOT preceded
@@ -23,6 +24,15 @@ import re
 # and /Work/project in ~/Work/project are not extracted as absolute paths.
 # Stops at whitespace and shell metacharacters to avoid eating operators.
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![.~\w])(/[^\s;|&><`'\"()\[\]{}\\]+)")
+
+# Matches tilde-prefixed path tokens (~/...).  The shell expands these to
+# absolute paths at runtime.  Extracted separately and expanded via
+# os.path.expanduser() so they are checked against the workspace boundary.
+# Without this, tilde paths bypass the boundary entirely because the
+# negative lookbehind in _ABSOLUTE_PATH_RE excludes them from extraction.
+# The lookbehind also excludes ':' to skip remote host paths like
+# user@host:~/path used by scp/rsync.
+_TILDE_PATH_RE = re.compile(r"(?<![\w:])(~(?:/[^\s;|&><`'\"()\[\]{}\\]+))")
 
 # Matches URL tokens (scheme://...) so they can be stripped before path
 # extraction.  Covers http, https, ftp, ssh, git, file, and any other
@@ -117,12 +127,21 @@ def extract_absolute_paths(command: str) -> list[str]:
     # 3. Replace message-flag arguments with whitespace so paths inside
     #    commit messages, tag annotations, etc. are not extracted.
     sanitized = _MSG_FLAG_RE.sub(" ", sanitized)
-    # 4. Extract candidate paths, then discard glob patterns.
+    # 4. Extract candidate absolute paths, then discard glob patterns.
     #    Real absolute paths never contain '*' or '?'.  These characters
     #    appear in flag arguments like ``find -path '*/foo/*'`` or
     #    ``grep --include='*.py'`` and are not filesystem targets.
     candidates = _ABSOLUTE_PATH_RE.findall(sanitized)
-    return [p for p in candidates if "*" not in p and "?" not in p]
+    absolute = [p for p in candidates if "*" not in p and "?" not in p]
+    # 5. Extract tilde-prefixed paths and expand to absolute paths.
+    #    Without this step, ~/Work/topologies bypasses the boundary entirely
+    #    because the negative lookbehind in _ABSOLUTE_PATH_RE excludes them.
+    tilde_candidates = _TILDE_PATH_RE.findall(sanitized)
+    for tp in tilde_candidates:
+        expanded = os.path.expanduser(tp)
+        if expanded != tp and "*" not in expanded and "?" not in expanded:
+            absolute.append(expanded)
+    return absolute
 
 
 def detect_ambiguous_patterns(command: str) -> list[tuple[str, str]]:
