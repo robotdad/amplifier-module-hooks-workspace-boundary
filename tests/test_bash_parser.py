@@ -297,6 +297,63 @@ class TestGlobPatternsNotExtracted:
 
 
 # ---------------------------------------------------------------------------
+# Tilde path false-positive prevention
+# ---------------------------------------------------------------------------
+
+
+class TestTildePathsNotExtracted:
+    """Tilde-prefixed paths (~/...) must not have their suffix extracted.
+
+    The shell expands ``~/path`` to ``/home/user/path``, but the regex
+    sees ``~`` followed by ``/path`` and — without the tilde in the
+    lookbehind — would extract ``/path`` as an absolute path candidate.
+    This produces false positives because ``/path`` is not the intended
+    filesystem target.
+    """
+
+    def test_tilde_home_path_not_extracted(self) -> None:
+        """Standalone ~/path should not extract /path."""
+        paths = extract_absolute_paths("ls ~/Documents")
+        assert paths == []
+
+    def test_cp_from_tilde_to_workspace(self) -> None:
+        """Only the real absolute destination should be extracted."""
+        paths = extract_absolute_paths("cp ~/data/file.csv /workspace/results/")
+        assert "/workspace/results/" in paths
+        assert len(paths) == 1
+
+    def test_rsync_tilde_source(self) -> None:
+        paths = extract_absolute_paths("rsync ~/project/ /workspace/backup/")
+        assert "/workspace/backup/" in paths
+        assert not any("project" in p for p in paths)
+
+    def test_scp_remote_tilde(self) -> None:
+        """scp with remote ~/path — neither the remote path nor tilde suffix extracted."""
+        paths = extract_absolute_paths("scp user@host:~/config.yaml /workspace/")
+        assert "/workspace/" in paths
+        assert not any("config.yaml" in p for p in paths)
+
+    def test_ssh_cat_remote_tilde(self) -> None:
+        """ssh host 'cat ~/file' — the remote ~/file is not a host path."""
+        paths = extract_absolute_paths("ssh host 'cat ~/Work/project/data.csv'")
+        assert paths == []
+
+    def test_cd_tilde(self) -> None:
+        paths = extract_absolute_paths("cd ~/Work/project && make build")
+        assert paths == []
+
+    def test_tilde_nested_deep_path(self) -> None:
+        paths = extract_absolute_paths("cat ~/a/b/c/d/e/file.txt")
+        assert paths == []
+
+    def test_tilde_mixed_with_absolute(self) -> None:
+        """Command with both ~/path and /absolute/path."""
+        paths = extract_absolute_paths("diff ~/local/config.yaml /etc/config.yaml")
+        assert "/etc/config.yaml" in paths
+        assert len(paths) == 1
+
+
+# ---------------------------------------------------------------------------
 # detect_ambiguous_patterns
 # ---------------------------------------------------------------------------
 

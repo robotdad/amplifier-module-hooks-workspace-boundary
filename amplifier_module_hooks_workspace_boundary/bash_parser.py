@@ -17,12 +17,12 @@ from __future__ import annotations
 import re
 
 # Matches absolute path tokens starting with '/' that are NOT preceded
-# by a dot or word character — this prevents extracting /path from relative
-# tokens like ./path or word/path.
-# Uses a negative lookbehind (?<![.\w]) so that /setup.sh in ./setup.sh
-# is not extracted as an absolute path.
+# by a dot, tilde, or word character — this prevents extracting /path from
+# relative tokens like ./path, ~/path, or word/path.
+# Uses a negative lookbehind (?<![.~\w]) so that /setup.sh in ./setup.sh
+# and /Work/project in ~/Work/project are not extracted as absolute paths.
 # Stops at whitespace and shell metacharacters to avoid eating operators.
-_ABSOLUTE_PATH_RE = re.compile(r"(?<![.\w])(/[^\s;|&><`'\"()\[\]{}\\]+)")
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![.~\w])(/[^\s;|&><`'\"()\[\]{}\\]+)")
 
 # Matches URL tokens (scheme://...) so they can be stripped before path
 # extraction.  Covers http, https, ftp, ssh, git, file, and any other
