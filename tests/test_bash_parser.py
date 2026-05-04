@@ -297,6 +297,83 @@ class TestGlobPatternsNotExtracted:
 
 
 # ---------------------------------------------------------------------------
+# Message-flag false-positive prevention (git commit -m, etc.)
+# ---------------------------------------------------------------------------
+
+
+class TestMessageFlagContentNotExtracted:
+    """Paths inside message-flag arguments must not be extracted.
+
+    Commands like ``git commit -m "fix /outside/path"`` pass a text
+    string, not a filesystem path.  The message-flag pre-filter strips
+    the content of ``-m``, ``--message``, and compound flags like
+    ``-am`` so that path-like substrings inside messages don't trigger
+    false boundary violations.
+    """
+
+    def test_git_commit_m_single_quotes(self) -> None:
+        paths = extract_absolute_paths("git commit -m 'fix: handle /outside/path'")
+        assert paths == []
+
+    def test_git_commit_m_double_quotes(self) -> None:
+        paths = extract_absolute_paths('git commit -m "fix: handle /outside/path"')
+        assert paths == []
+
+    def test_git_commit_am_with_message(self) -> None:
+        paths = extract_absolute_paths('git commit -am "refactor /src/old/module"')
+        assert paths == []
+
+    def test_git_commit_message_long_flag(self) -> None:
+        paths = extract_absolute_paths(
+            'git commit --message="chore: bump /etc/config version"'
+        )
+        assert paths == []
+
+    def test_git_commit_message_long_flag_space(self) -> None:
+        paths = extract_absolute_paths(
+            "git commit --message 'chore: bump /etc/config version'"
+        )
+        assert paths == []
+
+    def test_git_tag_m(self) -> None:
+        paths = extract_absolute_paths('git tag -m "release /v1.0" v1.0')
+        assert paths == []
+
+    def test_git_tag_am(self) -> None:
+        paths = extract_absolute_paths('git tag -am "annotated /release/notes" v2.0')
+        assert paths == []
+
+    def test_message_flag_with_real_path_before(self) -> None:
+        """Real paths outside the message must still be extracted."""
+        paths = extract_absolute_paths(
+            'cat /workspace/CHANGELOG.md && git commit -m "update /changelog"'
+        )
+        assert "/workspace/CHANGELOG.md" in paths
+        assert not any("changelog" in p for p in paths)
+
+    def test_message_flag_with_real_path_after(self) -> None:
+        """Real paths after the message flag must still be extracted."""
+        paths = extract_absolute_paths(
+            'git commit -m "fix /outside/path" -- /workspace/file.py'
+        )
+        assert "/workspace/file.py" in paths
+        assert not any("outside" in p for p in paths)
+
+    def test_non_git_m_flag_with_message(self) -> None:
+        """The -m filter is not git-specific — any -m 'quoted' is stripped."""
+        paths = extract_absolute_paths("sometool -m 'note about /var/log' /tmp/out")
+        assert "/tmp/out" in paths
+        assert not any("var" in p for p in paths)
+
+    def test_unquoted_m_flag_not_stripped(self) -> None:
+        """Unquoted -m arguments are NOT stripped — only quoted content."""
+        paths = extract_absolute_paths("git commit -m /tmp/issue")
+        # The unquoted arg is not matched by the regex, so /tmp/issue
+        # is extracted normally (conservative: may be a real path).
+        assert "/tmp/issue" in paths
+
+
+# ---------------------------------------------------------------------------
 # Tilde path false-positive prevention
 # ---------------------------------------------------------------------------
 

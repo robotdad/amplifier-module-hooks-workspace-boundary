@@ -36,6 +36,15 @@ _CONTAINER_EXEC_RE = re.compile(
     r"\b(?:docker|podman|nerdctl|incus|lxc|kubectl|amplifier-digital-twin)\s+exec\b"
 )
 
+# Strips the content of message-flag arguments (e.g. ``git commit -m "..."``).
+# These flags take a text string, not a filesystem path.  Without this
+# pre-filter, paths mentioned *inside* commit messages, tag annotations,
+# etc. are extracted as candidates and trigger false boundary violations.
+#
+# Matches: -m 'msg', -am "msg", --message="msg", --message 'msg'
+# The flag letter class [-a-z]*m covers compound short flags like -am, -sm.
+_MSG_FLAG_RE = re.compile(r"""(?:-[a-z]*m|--message)\s*=?\s*(?:'[^']*'|"[^"]*")""")
+
 # Patterns that defeat static path analysis, paired with human-readable descriptions.
 # Order matters: more specific patterns before general ones.
 _AMBIGUOUS_PATTERNS: list[tuple[str, str]] = [
@@ -77,7 +86,7 @@ def _strip_container_internal(command: str) -> str:
 def extract_absolute_paths(command: str) -> list[str]:
     """Extract absolute path tokens from a bash command string via regex.
 
-    Two pre-filters run before path extraction:
+    Three pre-filters run before path extraction:
 
     1. **Container exec** — when a container runtime ``exec`` command is
        detected (docker, podman, incus, kubectl, amplifier-digital-twin,
@@ -85,6 +94,9 @@ def extract_absolute_paths(command: str) -> list[str]:
        paths live inside the container, not on the host filesystem.
     2. **URLs** — ``scheme://...`` tokens are replaced with whitespace so
        URL path components are not mistaken for filesystem paths.
+    3. **Message flags** — ``-m "..."`` / ``--message="..."`` arguments
+       are replaced with whitespace so paths inside commit messages, tag
+       annotations, etc. are not mistaken for filesystem targets.
 
     Will miss dynamically constructed paths (variable expansion, subshell
     substitution, etc.). Use :func:`detect_ambiguous_patterns` to surface
@@ -102,7 +114,10 @@ def extract_absolute_paths(command: str) -> list[str]:
     sanitized = _strip_container_internal(command)
     # 2. Replace URLs with whitespace so their path components are not extracted.
     sanitized = _URL_RE.sub(" ", sanitized)
-    # 3. Extract candidate paths, then discard glob patterns.
+    # 3. Replace message-flag arguments with whitespace so paths inside
+    #    commit messages, tag annotations, etc. are not extracted.
+    sanitized = _MSG_FLAG_RE.sub(" ", sanitized)
+    # 4. Extract candidate paths, then discard glob patterns.
     #    Real absolute paths never contain '*' or '?'.  These characters
     #    appear in flag arguments like ``find -path '*/foo/*'`` or
     #    ``grep --include='*.py'`` and are not filesystem targets.
