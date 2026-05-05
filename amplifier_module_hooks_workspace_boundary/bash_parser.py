@@ -48,14 +48,32 @@ _CONTAINER_EXEC_RE = re.compile(
     r"\b(?:docker|podman|nerdctl|incus|lxc|kubectl|amplifier-digital-twin)\s+exec\b"
 )
 
-# Strips the content of message-flag arguments (e.g. ``git commit -m "..."``).
+# Strips the content of message-flag and data-payload arguments
+# (e.g. ``git commit -m "..."``, ``gh issue create --body '...'``).
 # These flags take a text string, not a filesystem path.  Without this
-# pre-filter, paths mentioned *inside* commit messages, tag annotations,
-# etc. are extracted as candidates and trigger false boundary violations.
+# pre-filter, paths mentioned *inside* commit messages, issue bodies,
+# PR descriptions, etc. are extracted as candidates and trigger false
+# boundary violations.
 #
-# Matches: -m 'msg', -am "msg", --message="msg", --message 'msg'
+# Matches: -m 'msg', -am "msg", --message="msg", --message 'msg',
+#          --body 'text', --title="text", --description 'text', etc.
 # The flag letter class [-a-z]*m covers compound short flags like -am, -sm.
-_MSG_FLAG_RE = re.compile(r"""(?:-[a-z]*m|--message)\s*=?\s*(?:'[^']*'|"[^"]*")""")
+_MSG_FLAG_RE = re.compile(
+    r"""(?:-[a-z]*m|--(?:message|body|title|description|notes|subject|annotation))\s*=?\s*(?:'[^']*'|"[^"]*")"""
+)
+
+# Strips heredoc content (``<< 'EOF' ... EOF``).  Everything between the
+# heredoc marker and its closing delimiter is stdin data, not a command
+# string.  Without this pre-filter, paths mentioned as text content inside
+# heredocs are extracted as candidates and trigger false boundary violations.
+#
+# Matches: << EOF, << 'EOF', << "EOF", <<-EOF, <<-'EOF', <<-"EOF"
+# The closing delimiter must appear on its own line (possibly indented
+# for <<- form).
+_HEREDOC_RE = re.compile(
+    r"""<<-?\s*['"]?(\w+)['"]?[^\n]*\n.*?^\s*\1\s*$""",
+    re.MULTILINE | re.DOTALL,
+)
 
 # Patterns that defeat static path analysis, paired with human-readable descriptions.
 # Order matters: more specific patterns before general ones.
@@ -98,7 +116,7 @@ def _strip_container_internal(command: str) -> str:
 def extract_absolute_paths(command: str) -> list[str]:
     """Extract absolute path tokens from a bash command string via regex.
 
-    Three pre-filters run before path extraction:
+    Four pre-filters run before path extraction:
 
     1. **Container exec** — when a container runtime ``exec`` command is
        detected (docker, podman, incus, kubectl, amplifier-digital-twin,
@@ -106,9 +124,14 @@ def extract_absolute_paths(command: str) -> list[str]:
        paths live inside the container, not on the host filesystem.
     2. **URLs** — ``scheme://...`` tokens are replaced with whitespace so
        URL path components are not mistaken for filesystem paths.
-    3. **Message flags** — ``-m "..."`` / ``--message="..."`` arguments
-       are replaced with whitespace so paths inside commit messages, tag
-       annotations, etc. are not mistaken for filesystem targets.
+    3. **Heredoc content** — everything between a heredoc marker
+       (``<< EOF``, ``<< 'EOF'``, ``<<-"EOF"``) and its closing
+       delimiter is replaced with whitespace.  Heredoc content is stdin
+       data, not command arguments.
+    4. **Data-payload flags** — ``-m "..."``, ``--message="..."``,
+       ``--body '...'``, ``--title "..."``, etc. are replaced with
+       whitespace so paths inside commit messages, issue bodies, PR
+       descriptions, etc. are not mistaken for filesystem targets.
 
     Will miss dynamically constructed paths (variable expansion, subshell
     substitution, etc.). Use :func:`detect_ambiguous_patterns` to surface
@@ -126,10 +149,13 @@ def extract_absolute_paths(command: str) -> list[str]:
     sanitized = _strip_container_internal(command)
     # 2. Replace URLs with whitespace so their path components are not extracted.
     sanitized = _URL_RE.sub(" ", sanitized)
-    # 3. Replace message-flag arguments with whitespace so paths inside
-    #    commit messages, tag annotations, etc. are not extracted.
+    # 3. Replace heredoc content with whitespace so paths inside stdin data
+    #    payloads (cat << EOF ... EOF) are not extracted.
+    sanitized = _HEREDOC_RE.sub(" ", sanitized)
+    # 4. Replace data-payload flag arguments with whitespace so paths inside
+    #    commit messages, issue bodies, PR descriptions, etc. are not extracted.
     sanitized = _MSG_FLAG_RE.sub(" ", sanitized)
-    # 4. Extract candidate absolute paths, then discard glob patterns.
+    # 5. Extract candidate absolute paths, then discard glob patterns.
     #    Real absolute paths never contain '*' or '?'.  These characters
     #    appear in flag arguments like ``find -path '*/foo/*'`` or
     #    ``grep --include='*.py'`` and are not filesystem targets.
@@ -137,7 +163,7 @@ def extract_absolute_paths(command: str) -> list[str]:
     absolute = [
         p for p in candidates if "*" not in p and "?" not in p and p.rstrip("/") != ""
     ]
-    # 5. Extract tilde-prefixed paths and expand to absolute paths.
+    # 6. Extract tilde-prefixed paths and expand to absolute paths.
     #    Without this step, ~/Work/topologies bypasses the boundary entirely
     #    because the negative lookbehind in _ABSOLUTE_PATH_RE excludes them.
     tilde_candidates = _TILDE_PATH_RE.findall(sanitized)

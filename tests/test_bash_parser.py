@@ -346,9 +346,7 @@ class TestColonSeparatedNotMerged:
         assert not any(":" in p for p in paths)
 
     def test_classpath_splits(self) -> None:
-        paths = extract_absolute_paths(
-            "java -cp /opt/lib/a.jar:/opt/lib/b.jar Main"
-        )
+        paths = extract_absolute_paths("java -cp /opt/lib/a.jar:/opt/lib/b.jar Main")
         assert "/opt/lib/a.jar" in paths
         assert "/opt/lib/b.jar" in paths
         assert not any(":" in p for p in paths)
@@ -375,9 +373,7 @@ class TestRootPathNotExtracted:
 
     def test_jq_double_slash_not_extracted(self) -> None:
         """jq's // null-coalescing operator must not yield a path."""
-        paths = extract_absolute_paths(
-            """jq '.data // null' /tmp/input.json"""
-        )
+        paths = extract_absolute_paths("""jq '.data // null' /tmp/input.json""")
         assert "/tmp/input.json" in paths
         assert "/" not in paths
         assert "//" not in paths
@@ -471,6 +467,156 @@ class TestMessageFlagContentNotExtracted:
         # The unquoted arg is not matched by the regex, so /tmp/issue
         # is extracted normally (conservative: may be a real path).
         assert "/tmp/issue" in paths
+
+
+# ---------------------------------------------------------------------------
+# Data-payload flag false-positive prevention (--body, --title, etc.)
+# ---------------------------------------------------------------------------
+
+
+class TestDataPayloadFlagContentNotExtracted:
+    """Paths inside data-payload flag arguments must not be extracted.
+
+    Commands like ``gh issue create --body 'see /outside/path'`` and
+    ``gh pr create --title 'fix /some/module'`` pass text strings to
+    APIs, not filesystem paths.  The data-payload pre-filter strips the
+    content of ``--body``, ``--title``, ``--description``, ``--notes``,
+    ``--subject``, and ``--annotation`` flags so that path-like
+    substrings inside them don't trigger false boundary violations.
+    """
+
+    def test_gh_issue_create_body_single_quotes(self) -> None:
+        paths = extract_absolute_paths(
+            "gh issue create --body 'fix: see /amplifier-foundation/scripts/session.py'"
+        )
+        assert paths == []
+
+    def test_gh_issue_create_body_double_quotes(self) -> None:
+        paths = extract_absolute_paths(
+            'gh issue create --body "fix: see /amplifier-foundation/scripts/session.py"'
+        )
+        assert paths == []
+
+    def test_gh_issue_create_body_equals(self) -> None:
+        paths = extract_absolute_paths(
+            "gh issue create --body='Error at /var/log/app.log'"
+        )
+        assert paths == []
+
+    def test_gh_pr_create_title(self) -> None:
+        paths = extract_absolute_paths(
+            "gh pr create --title 'fix: handle /outside/path correctly'"
+        )
+        assert paths == []
+
+    def test_gh_pr_create_body_with_real_path(self) -> None:
+        """Real paths outside the --body must still be extracted."""
+        paths = extract_absolute_paths(
+            "cat /workspace/README.md && gh issue create --body 'about /outside/path'"
+        )
+        assert "/workspace/README.md" in paths
+        assert not any("outside" in p for p in paths)
+
+    def test_gh_release_create_notes(self) -> None:
+        paths = extract_absolute_paths(
+            "gh release create v1.0 --notes 'see /docs/changelog for details'"
+        )
+        assert paths == []
+
+    def test_description_flag(self) -> None:
+        paths = extract_absolute_paths(
+            "sometool create --description 'references /etc/config.yaml'"
+        )
+        assert paths == []
+
+    def test_subject_flag(self) -> None:
+        paths = extract_absolute_paths(
+            "mail --subject 'Error in /var/log/syslog' user@host"
+        )
+        assert paths == []
+
+    def test_annotation_flag(self) -> None:
+        paths = extract_absolute_paths(
+            "kubectl annotate pod mypod --annotation 'path=/opt/data/store'"
+        )
+        assert paths == []
+
+    def test_title_with_equals(self) -> None:
+        paths = extract_absolute_paths(
+            'gh issue create --title="bug: /usr/local/bin/tool crashes"'
+        )
+        assert paths == []
+
+
+# ---------------------------------------------------------------------------
+# Heredoc content false-positive prevention
+# ---------------------------------------------------------------------------
+
+
+class TestHeredocContentNotExtracted:
+    """Paths inside heredoc content must not be extracted.
+
+    Heredocs (``<< EOF ... EOF``) provide stdin data to a command.
+    The content between the markers is text, not command arguments.
+    Path-like strings inside heredocs must not trigger boundary violations.
+    """
+
+    def test_basic_heredoc_unquoted(self) -> None:
+        cmd = "cat << EOF\n/outside/secret/path\nEOF"
+        paths = extract_absolute_paths(cmd)
+        assert paths == []
+
+    def test_basic_heredoc_single_quoted_marker(self) -> None:
+        cmd = "cat << 'EOF'\n/outside/secret/path\nEOF"
+        paths = extract_absolute_paths(cmd)
+        assert paths == []
+
+    def test_basic_heredoc_double_quoted_marker(self) -> None:
+        cmd = 'cat << "EOF"\n/outside/secret/path\nEOF'
+        paths = extract_absolute_paths(cmd)
+        assert paths == []
+
+    def test_heredoc_with_redirect(self) -> None:
+        cmd = "cat > /workspace/output.txt << EOF\n/outside/path/in/content\nEOF"
+        paths = extract_absolute_paths(cmd)
+        assert "/workspace/output.txt" in paths
+        assert not any("outside" in p for p in paths)
+
+    def test_heredoc_indented_closing_marker(self) -> None:
+        """<<- form allows indented closing marker."""
+        cmd = "cat <<- MARKER\n\t/outside/path/data\n\tMARKER"
+        paths = extract_absolute_paths(cmd)
+        assert paths == []
+
+    def test_heredoc_multiple_paths_inside(self) -> None:
+        cmd = (
+            "cat << EOF\n"
+            "/amplifier-foundation/scripts/amplifier-session.py\n"
+            "/var/log/syslog\n"
+            "/etc/hosts\n"
+            "EOF"
+        )
+        paths = extract_absolute_paths(cmd)
+        assert paths == []
+
+    def test_heredoc_with_real_path_before(self) -> None:
+        """Real paths before the heredoc must still be extracted."""
+        cmd = "cat /workspace/config.json && cat << EOF\n/outside/path\nEOF"
+        paths = extract_absolute_paths(cmd)
+        assert "/workspace/config.json" in paths
+        assert not any("outside" in p for p in paths)
+
+    def test_heredoc_custom_marker(self) -> None:
+        cmd = "cat << ISSUE_EOF\n/amplifier-foundation/path\nISSUE_EOF"
+        paths = extract_absolute_paths(cmd)
+        assert paths == []
+
+    def test_heredoc_does_not_eat_trailing_commands(self) -> None:
+        """Content after the closing marker must still be parsed."""
+        cmd = "cat << EOF\n/inside/heredoc\nEOF\ncat /workspace/real-file.txt"
+        paths = extract_absolute_paths(cmd)
+        assert "/workspace/real-file.txt" in paths
+        assert not any("inside" in p for p in paths)
 
 
 # ---------------------------------------------------------------------------
