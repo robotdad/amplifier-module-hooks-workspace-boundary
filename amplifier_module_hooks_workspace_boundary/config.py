@@ -7,9 +7,10 @@ Supports user-contributed safe directories via YAML config files at two levels:
 - Global:    ``~/.amplifier/workspace-boundary.yaml``
 - Workspace: ``{workspace_root}/.amplifier/workspace-boundary.yaml``
 
-Only path-extension keys are accepted from user configs (``extra_workspace_roots``,
-``extra_read_roots``, ``extra_write_roots``).  Security-sensitive keys are
-bundle-author-only and are rejected with a warning if found in user configs.
+Only path-extension keys and the ``enabled`` flag are accepted from user configs
+(``extra_workspace_roots``, ``extra_read_roots``, ``extra_write_roots``,
+``enabled``).  Security-sensitive keys are bundle-author-only and are rejected
+with a warning if found in user configs.
 
 All user config loading happens at mount time — changes take effect only on
 session boundaries, preserving the static-at-mount-time security guarantee.
@@ -72,8 +73,13 @@ _ALLOWED_USER_CONFIG_KEYS: frozenset[str] = frozenset(
         "extra_workspace_roots",
         "extra_read_roots",
         "extra_write_roots",
+        "enabled",
     }
 )
+
+# Keys that are boolean flags (not path lists).  Handled separately from
+# the path-extension keys in _load_user_config().
+_BOOLEAN_USER_CONFIG_KEYS: frozenset[str] = frozenset({"enabled"})
 
 _USER_CONFIG_FILENAME = "workspace-boundary.yaml"
 """Name of the user config file at both global and workspace levels."""
@@ -148,6 +154,16 @@ class BoundaryConfig:
     strict_unknown_tools: bool = False
     """Deny unknown tool names when enforcement_mode=enforce."""
 
+    enabled: bool = True
+    """If False, all boundary checks are skipped.
+
+    This is the workspace-level opt-out.  Set ``enabled: false`` in a user
+    config file (``{workspace_root}/.amplifier/workspace-boundary.yaml`` or
+    ``~/.amplifier/workspace-boundary.yaml``) to disable enforcement for that
+    workspace.  The flag is static at mount time — it cannot be toggled by
+    the agent at runtime.
+    """
+
     user_config_sources: list[dict[str, Any]] = field(default_factory=list)
     """Audit trail of user config files loaded at mount time.
 
@@ -200,8 +216,8 @@ def _discover_from_marker(marker_files: list[str] | None = None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _load_user_config(path: str) -> dict[str, list[str]]:
-    """Load a user config YAML file and return only allowed path-extension keys.
+def _load_user_config(path: str) -> dict[str, Any]:
+    """Load a user config YAML file and return only allowed keys.
 
     Silently returns an empty dict when the file does not exist (expected case).
     Logs a warning and returns empty dict on parse errors or I/O failures.
@@ -213,7 +229,8 @@ def _load_user_config(path: str) -> dict[str, list[str]]:
 
     Returns:
         Dict with zero or more of ``extra_workspace_roots``, ``extra_read_roots``,
-        ``extra_write_roots`` — each a list of raw path strings.
+        ``extra_write_roots`` (each a list of raw path strings), and optionally
+        ``enabled`` (bool).
     """
     if not _HAS_YAML:
         logger.debug("PyYAML not available — skipping user config at %s", path)
@@ -252,8 +269,25 @@ def _load_user_config(path: str) -> dict[str, list[str]]:
         )
 
     # Extract and validate allowed keys.
-    result: dict[str, list[str]] = {}
-    for key in _ALLOWED_USER_CONFIG_KEYS:
+    result: dict[str, Any] = {}
+
+    # Boolean flags (e.g. ``enabled``).
+    for key in _BOOLEAN_USER_CONFIG_KEYS:
+        value = raw.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, bool):
+            logger.warning(
+                "workspace-boundary: user config %s key %r must be a boolean — skipping",
+                path,
+                key,
+            )
+            continue
+        result[key] = value
+
+    # Path-extension keys.
+    path_keys = _ALLOWED_USER_CONFIG_KEYS - _BOOLEAN_USER_CONFIG_KEYS
+    for key in path_keys:
         value = raw.get(key)
         if value is None:
             continue
@@ -279,10 +313,11 @@ def _load_user_config(path: str) -> dict[str, list[str]]:
         if paths:
             result[key] = paths
 
+    path_count = sum(len(v) for v in result.values() if isinstance(v, list))
     logger.info(
         "workspace-boundary: loaded user config %s — %d path(s) across %d key(s)",
         path,
-        sum(len(v) for v in result.values()),
+        path_count,
         len(result),
     )
     return result
@@ -358,10 +393,14 @@ def resolve_boundary(config: dict[str, Any] | None) -> BoundaryConfig:
     user_extra_workspace_roots: list[str] = []
     user_extra_read_roots: list[str] = []
     user_extra_write_roots: list[str] = []
+    # Track whether any user config explicitly set enabled: false.
+    # None means "no user config expressed an opinion" → fall through to
+    # bundle config or default (True).
+    user_enabled: bool | None = None
 
     for uc_path in _user_config_paths(workspace_root):
         uc_data = _load_user_config(uc_path)
-        paths_added = sum(len(v) for v in uc_data.values())
+        paths_added = sum(len(v) for v in uc_data.values() if isinstance(v, list))
         user_config_sources.append(
             {
                 "path": uc_path,
@@ -373,6 +412,9 @@ def resolve_boundary(config: dict[str, Any] | None) -> BoundaryConfig:
         user_extra_workspace_roots.extend(uc_data.get("extra_workspace_roots", []))
         user_extra_read_roots.extend(uc_data.get("extra_read_roots", []))
         user_extra_write_roots.extend(uc_data.get("extra_write_roots", []))
+        # Last-write-wins for booleans (workspace config overrides global).
+        if "enabled" in uc_data:
+            user_enabled = uc_data["enabled"]
 
     # --- Merge: user config paths + bundle config paths (all additive) ---
     all_raw_workspace_roots = user_extra_workspace_roots + list(
@@ -392,6 +434,19 @@ def resolve_boundary(config: dict[str, Any] | None) -> BoundaryConfig:
     extra_read_roots = list(dict.fromkeys(extra_read_roots))
     extra_write_roots = list(dict.fromkeys(extra_write_roots))
 
+    # --- Resolve ``enabled`` flag ---
+    # Priority: user config (workspace > global) > bundle config > default.
+    # user_enabled is None when no user config expressed an opinion.
+    if user_enabled is not None:
+        enabled = user_enabled
+    else:
+        enabled = cfg.get("enabled", True)
+    if not enabled:
+        logger.info(
+            "workspace-boundary: DISABLED via %s",
+            "user config" if user_enabled is not None else "bundle config",
+        )
+
     # --- Tool dispatch: merge defaults with user-provided tool_paths ---
     tool_dispatch: dict[str, dict[str, str]] = dict(_DEFAULT_TOOL_DISPATCH)
     for tool_name, path_key in cfg.get("tool_paths", {}).items():
@@ -407,5 +462,6 @@ def resolve_boundary(config: dict[str, Any] | None) -> BoundaryConfig:
         resolve_symlinks=cfg.get("resolve_symlinks", True),
         bash_strict_mode=cfg.get("bash_strict_mode", False),
         strict_unknown_tools=cfg.get("strict_unknown_tools", False),
+        enabled=enabled,
         user_config_sources=user_config_sources,
     )

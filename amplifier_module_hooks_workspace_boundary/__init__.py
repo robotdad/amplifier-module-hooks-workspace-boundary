@@ -67,10 +67,11 @@ async def mount(
         boundary_config = BoundaryConfig(workspace_root=os.path.abspath(os.getcwd()))
 
     logger.info(
-        "workspace-boundary mounted: root=%s enforcement=%s resolve_symlinks=%s",
+        "workspace-boundary mounted: root=%s enforcement=%s resolve_symlinks=%s enabled=%s",
         boundary_config.workspace_root,
         boundary_config.enforcement_mode,
         boundary_config.resolve_symlinks,
+        boundary_config.enabled,
     )
 
     # ------------------------------------------------------------------
@@ -245,6 +246,10 @@ async def mount(
     async def pre_handler(event_name: str, data: dict) -> HookResult:
         """Intercept tool:pre events and enforce workspace boundary."""
         try:
+            # Workspace-level opt-out: skip all enforcement when disabled.
+            if not boundary_config.enabled:
+                return HookResult(action="continue")
+
             tool_name: str = data.get("tool_name", "")
             tool_input: dict = data.get("tool_input", {})
 
